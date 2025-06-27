@@ -1,0 +1,28 @@
+{
+    "population_size": 20,
+    "elite_pool_size": 1,
+    "mutation_rate": 0.1,
+    "crossover_strategy": "mixed",
+    "perturbation_interval": 5,
+    "checkpoint_interval": 5,
+    "selection_method": "tournament",
+    "fitness_function": "evaluate_policy_inverse_cvar",
+    "early_stopping": {
+        "patience": 5,
+        "delta": 0.01
+    },
+    "net_config": {
+        "layer_dims": [
+            4,
+            64,
+            64,
+            2
+        ],
+        "activations": [
+            "relu",
+            "relu",
+            "identity"
+        ]
+    },
+    "seed": null
+}

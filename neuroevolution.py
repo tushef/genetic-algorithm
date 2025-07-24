@@ -6,7 +6,6 @@ import uuid
 from datetime import datetime
 
 import numpy as np
-import niryo_gym
 import gymnasium as gym
 import pandas as pd
 import torch
@@ -15,9 +14,8 @@ from torch.distributions import Normal
 
 from scipy.spatial.distance import pdist
 
-""" Working Prototype on NedReach """
 
-def evaluate_success_rate(model, episodes=30, render=False, env_name='CartPole-v1', success_threshold=500):
+def evaluate_success_rate(model, episodes=30, render=False, env_name='CartPole-v1'):
     env = gym.make(env_name)
     success_count = 0
 
@@ -32,11 +30,11 @@ def evaluate_success_rate(model, episodes=30, render=False, env_name='CartPole-v
 
             action, _ = model.sample(torch.FloatTensor(obs).unsqueeze(0))
             action = action.detach().cpu().numpy()[0]
-            obs, reward, terminated, truncated, _ = env.step(action)
+            obs, reward, terminated, truncated, info = env.step(action)
             done = terminated or truncated
             episode_reward += reward
 
-            if terminated:
+            if info.get("is_success", 0):
                 success_count += 1
 
     env.close()
@@ -102,7 +100,7 @@ def compute_cvar(rewards, alpha=0.2):
     worst_rewards = sorted_rewards[:cutoff]
     return np.mean(worst_rewards)
 
-def evaluate_policy_inverse_cvar(model, episodes=30, alpha=0.2, epsilon=1e-6, render=False, env_name='CartPole-v1'):
+def evaluate_policy_cvar(model, episodes=30, quantile=0.2, alpha=1.0, beta=0.5, render=False, env_name='CartPole-v1'):
     """
     Evaluate a model using a fitness score that penalizes std with the inverse of CVaR.
     """
@@ -130,13 +128,9 @@ def evaluate_policy_inverse_cvar(model, episodes=30, alpha=0.2, epsilon=1e-6, re
     rewards = np.array(episode_rewards)
     mean_reward = rewards.mean()
     std_reward = rewards.std()
-    cvar = compute_cvar(rewards, alpha=alpha)
+    cvar = compute_cvar(rewards, alpha=quantile)
 
-    # CVaR inversion
-    penalty_weight = 1.0 / (cvar + epsilon)
-    if penalty_weight < 0.0:
-        penalty_weight = -penalty_weight
-    fitness = mean_reward - penalty_weight * std_reward
+    fitness = mean_reward - alpha * std_reward - beta * abs(cvar)
 
     return fitness
 
@@ -283,13 +277,13 @@ class GeneticAlgorithm:
         self.verbose = verbose
 
         # Initialize random population
-        self._load_population_from_checkpoints(checkpoints_dir="neuroevolution/results")
-        # self.population = [DynamicNet(**net_config) for _ in range(pop_size)]
+        # self._load_population_from_checkpoints(checkpoints_dir="neuroevolution/results")
+        self.population = [Actor(**net_config) for _ in range(pop_size)]
         self.elite_pool = []  # Holds tuples of (model, fitness)
-        self.elite_pool_size = 1
+        self.elite_pool_size = int(0.2 * pop_size)
         self.checkpoint_elites = True
         self.checkpoint_interval = 5
-        self.elite_changed_counter = 0 # internal metrics
+        self.elite_changed_counter = 0  # internal metrics
         self._init_checkpoint_dir()
 
     def _load_population_from_checkpoints(self, checkpoints_dir):
@@ -306,6 +300,8 @@ class GeneticAlgorithm:
             model = Actor(**self.net_config)
             state_dict = torch.load(path, map_location=torch.device("cpu"))
             model.load_state_dict(state_dict)
+            fitness_score = self.fitness_fn(model, env_name=self.env_name)
+            print(f"Loaded checkpoint {path} with fitness {fitness_score:.4f}")
             self.population.append(model)
 
             if len(self.population) >= self.pop_size:
@@ -487,14 +483,14 @@ class GeneticAlgorithm:
             self.population = new_population
 
         log_df = pd.DataFrame(log_data)
-        log_df.to_csv("evolution_log.csv", index=False)
+        log_df.to_csv(os.path.join(self.checkpoint_dir, "evolution_log.csv"), index=False)
 
 
 if __name__ == "__main__":
     early_stopping = EarlyStoppingConfig(patience=25, min_delta=0.01)
     selection = SelectionStrategy(method='tournament', tournament_size=3)
 
-    env = gym.make('NedReach-v1')
+    env = gym.make('Pendulum-v1')
     obs, _ = env.reset()
     state_dim = obs.shape[0]
     action_dim = env.action_space.shape[0]
@@ -503,30 +499,30 @@ if __name__ == "__main__":
 
     ga = GeneticAlgorithm(
         pop_size=50,
-        net_config={'hidden_dims': [state_dim, 256, 128, 64],
+        net_config={'hidden_dims': [state_dim, 64, 64],
                     'activations': ['relu', 'relu', 'relu'],
                     'max_action': max_action,
                     'output_dim': action_dim
                     },
-        fitness_fn=fitness_fn_v1,
+        fitness_fn=evaluate_policy_cvar,
         crossover_strategy='mixed',
-        mutation_rate=0.1,
+        mutation_rate=0.5,
         perturbation_interval=10,
         selection_strategy=selection,
         early_stopping=early_stopping,
-        env_name='NedReach-v1',
+        env_name='Pendulum-v1',
         verbose=True
     )
 
     ga.evolve(max_generations=50)
 
     # Final Testing
-    actor = Actor(hidden_dims=[state_dim, 256, 128, 64], activations=['relu', 'relu', 'relu'],
+    actor = Actor(hidden_dims=[state_dim, 64, 64], activations=['relu', 'relu', 'relu'],
                   output_dim=action_dim, max_action=max_action)
 
     # Access the model from elite_pool contains (model, fitness) tuples
     best_model = ga.elite_pool[0][0] if isinstance(ga.elite_pool[0], tuple) else ga.elite_pool[0]
     actor.load_state_dict(best_model.state_dict())
-    fitness_score = evaluate_policy(actor, env_name='NedReach-v1')
+    fitness_score = evaluate_policy(actor, env_name='Pendulum-v1')
     print(fitness_score)
 
